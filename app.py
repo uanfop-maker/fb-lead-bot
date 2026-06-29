@@ -443,6 +443,33 @@ def health():
     return "ok"
 
 
+@app.get("/bulk-import")
+def bulk_import():
+    svc = _get_sheets()
+    if not svc:
+        return "Google Sheets not configured", 503
+    leads = fetch_all_leads()
+    if not leads:
+        return "no leads", 200
+    rows = [["時間(UTC+8)", "姓名", "Email", "電話", "平台", "廣告名稱", "表單", "Lead ID"]]
+    for lead in sorted(leads, key=lambda x: x.get("created_time", "")):
+        ts = lead.get("created_time", "")
+        ts_str = ""
+        if ts:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(TZ_TAIPEI)
+            ts_str = dt.strftime("%Y-%m-%d %H:%M")
+        fd = {f["name"]: f.get("values", [""])[0] for f in lead.get("field_data", [])}
+        name = fd.get("full_name") or f"{fd.get('first_name', '')} {fd.get('last_name', '')}".strip()
+        rows.append([ts_str, name, fd.get("email", ""), fd.get("phone_number", ""),
+                     lead.get("platform", ""), lead.get("ad_name", ""),
+                     lead.get("form_name", ""), lead.get("id", "")])
+    svc.values().update(
+        spreadsheetId=SHEET_ID, range="A1",
+        valueInputOption="USER_ENTERED", body={"values": rows}
+    ).execute()
+    return f"imported {len(leads)} leads", 200
+
+
 # ── Startup (runs when gunicorn imports this module) ──────────────────────────
 
 def _setup_tg_webhook():
