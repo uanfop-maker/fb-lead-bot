@@ -5,11 +5,11 @@ from flask import Flask, request, abort
 
 app = Flask(__name__)
 
-FB_APP_SECRET        = os.environ["FB_APP_SECRET"]
-FB_VERIFY_TOKEN      = os.environ["FB_VERIFY_TOKEN"]
-FB_PAGE_ACCESS_TOKEN = os.environ["FB_PAGE_ACCESS_TOKEN"]
-TG_BOT_TOKEN         = os.environ["TG_BOT_TOKEN"]
-TG_CHAT_ID           = os.environ["TG_CHAT_ID"]
+FB_APP_SECRET        = os.environ.get("FB_APP_SECRET", "")
+FB_VERIFY_TOKEN      = os.environ.get("FB_VERIFY_TOKEN", "")
+FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "")
+TG_BOT_TOKEN         = os.environ.get("TG_BOT_TOKEN", "")
+TG_CHAT_ID           = os.environ.get("TG_CHAT_ID", "")
 SHEET_ID             = os.environ.get("SHEET_ID", "")
 _SA_JSON             = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "{}")
 FB_AD_ACCOUNT_ID     = os.environ.get("FB_AD_ACCOUNT_ID", "")
