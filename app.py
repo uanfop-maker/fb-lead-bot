@@ -4,13 +4,54 @@ from flask import Flask, request, abort
 
 app = Flask(__name__)
 
-FB_APP_SECRET       = os.environ["FB_APP_SECRET"]
-FB_VERIFY_TOKEN     = os.environ["FB_VERIFY_TOKEN"]
+FB_APP_SECRET        = os.environ["FB_APP_SECRET"]
+FB_VERIFY_TOKEN      = os.environ["FB_VERIFY_TOKEN"]
 FB_PAGE_ACCESS_TOKEN = os.environ["FB_PAGE_ACCESS_TOKEN"]
-TG_BOT_TOKEN        = os.environ["TG_BOT_TOKEN"]
-TG_CHAT_ID          = os.environ["TG_CHAT_ID"]
+TG_BOT_TOKEN         = os.environ["TG_BOT_TOKEN"]
+TG_CHAT_ID           = os.environ["TG_CHAT_ID"]
+SHEET_ID             = os.environ.get("SHEET_ID", "")
+_SA_JSON             = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "{}")
 
 GRAPH = "https://graph.facebook.com/v19.0"
+
+# Google Sheets client (lazy init)
+_sheets = None
+
+def _get_sheets():
+    global _sheets
+    if _sheets is not None:
+        return _sheets
+    try:
+        sa = json.loads(_SA_JSON)
+        if not sa or not sa.get("private_key"):
+            return None
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        creds = service_account.Credentials.from_service_account_info(
+            sa, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        _sheets = build("sheets", "v4", credentials=creds).spreadsheets()
+    except Exception as e:
+        print(f"Sheets init error: {e}")
+        _sheets = None
+    return _sheets
+
+
+def sheet_append(row: list):
+    if not SHEET_ID:
+        return
+    svc = _get_sheets()
+    if not svc:
+        return
+    try:
+        svc.values().append(
+            spreadsheetId=SHEET_ID,
+            range="A1",
+            valueInputOption="USER_ENTERED",
+            body={"values": [row]},
+        ).execute()
+    except Exception as e:
+        print(f"Sheets append error: {e}")
 
 
 def tg_send(text):
@@ -30,16 +71,17 @@ def fetch_lead(lead_id: str) -> dict:
     return r.json()
 
 
+LABEL_MAP = {
+    "full_name": "姓名", "email": "Email", "phone_number": "電話",
+    "first_name": "名", "last_name": "姓",
+}
+
+
 def format_lead(data: dict, form_id: str, page_id: str) -> str:
     fields = {f["name"]: f["values"][0] for f in data.get("field_data", [])}
     lines = ["🔔 <b>新潛在顧客</b>"]
-    label_map = {
-        "full_name": "姓名", "email": "Email", "phone_number": "電話",
-        "first_name": "名", "last_name": "姓",
-    }
     for key, val in fields.items():
-        label = label_map.get(key, key)
-        lines.append(f"• {label}：{val}")
+        lines.append(f"• {LABEL_MAP.get(key, key)}：{val}")
     lines.append(f"\n🕐 {data.get('created_time', '')[:16].replace('T', ' ')}")
     lines.append(f"📋 表單 ID：{form_id}")
     return "\n".join(lines)
@@ -80,10 +122,22 @@ def webhook_event():
             page_id = val.get("page_id", "")
 
             def notify(lid=lead_id, fid=form_id, pid=page_id):
-                time.sleep(2)  # wait for FB to have the lead ready
-                data = fetch_lead(lid)
-                msg  = format_lead(data, fid, pid)
+                time.sleep(2)
+                data   = fetch_lead(lid)
+                fields = {f["name"]: f["values"][0] for f in data.get("field_data", [])}
+                msg    = format_lead(data, fid, pid)
                 tg_send(msg)
+                # Log to Google Sheet: time, name, email, phone, form_id, lead_id
+                ts = data.get("created_time", "")[:16].replace("T", " ")
+                row = [
+                    ts,
+                    fields.get("full_name") or f"{fields.get('first_name','')} {fields.get('last_name','')}".strip(),
+                    fields.get("email", ""),
+                    fields.get("phone_number", ""),
+                    fid,
+                    lid,
+                ]
+                sheet_append(row)
 
             threading.Thread(target=notify, daemon=True).start()
 
