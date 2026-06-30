@@ -25,6 +25,9 @@ LABEL_MAP = {
 }
 PLATFORM_ICON = {"FB": "📘", "IG": "📷"}
 
+COLOR_FB = "1877F2"   # Facebook blue
+COLOR_IG = "C13584"   # Instagram purple
+
 # ── Google Sheets ─────────────────────────────────────────────────────────────
 
 _sheets = None
@@ -164,23 +167,71 @@ def fetch_insights_stats(since_ts: int, until_ts: int) -> dict:
 
 # ── XLS generation ────────────────────────────────────────────────────────────
 
-def leads_to_xlsx(leads: list, sheet_title: str = "潛在顧客") -> bytes:
+HEADERS = ["時間(UTC+8)", "姓名", "Email", "電話", "平台", "廣告名稱", "表單", "Lead ID"]
+
+
+def _lead_to_row(lead: dict) -> list:
+    ts = lead.get("created_time", "")
+    ts_str = ""
+    if ts:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(TZ_TAIPEI)
+        ts_str = dt.strftime("%Y-%m-%d %H:%M")
+    fd = {f["name"]: f.get("values", [""])[0] for f in lead.get("field_data", [])}
+    name = fd.get("full_name") or f"{fd.get('first_name', '')} {fd.get('last_name', '')}".strip()
+    return [ts_str, name, fd.get("email", ""), fd.get("phone_number", ""),
+            lead.get("platform", ""), lead.get("ad_name", ""),
+            lead.get("form_name", ""), lead.get("id", "")]
+
+
+def _apply_header_color(ws, hex_color: str):
+    """Apply bold white text on colored background to the header row."""
+    from openpyxl.styles import PatternFill, Font, Alignment
+    fill = PatternFill(start_color=hex_color, end_color=hex_color, fill_type="solid")
+    font = Font(bold=True, color="FFFFFF")
+    for cell in ws[1]:
+        cell.fill = fill
+        cell.font = font
+        cell.alignment = Alignment(horizontal="center")
+
+
+def leads_to_xlsx(leads: list, sheet_title: str = "潛在顧客",
+                  header_color: str = None) -> bytes:
+    """Single-sheet XLSX. Optionally color the header row."""
     import openpyxl
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = sheet_title
-    ws.append(["時間(UTC+8)", "姓名", "Email", "電話", "平台", "廣告名稱", "表單", "Lead ID"])
+    ws.append(HEADERS)
+    if header_color:
+        _apply_header_color(ws, header_color)
     for lead in sorted(leads, key=lambda x: x.get("created_time", "")):
-        ts = lead.get("created_time", "")
-        ts_str = ""
-        if ts:
-            dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(TZ_TAIPEI)
-            ts_str = dt.strftime("%Y-%m-%d %H:%M")
-        fd = {f["name"]: f.get("values", [""])[0] for f in lead.get("field_data", [])}
-        name = fd.get("full_name") or f"{fd.get('first_name', '')} {fd.get('last_name', '')}".strip()
-        ws.append([ts_str, name, fd.get("email", ""), fd.get("phone_number", ""),
-                   lead.get("platform", ""), lead.get("ad_name", ""),
-                   lead.get("form_name", ""), lead.get("id", "")])
+        ws.append(_lead_to_row(lead))
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def leads_to_xlsx_dual(fb_leads: list, ig_leads: list) -> bytes:
+    """Two-sheet XLSX: FB (blue header) + IG (purple header)."""
+    import openpyxl
+    wb = openpyxl.Workbook()
+
+    # FB sheet
+    ws_fb = wb.active
+    ws_fb.title = "FB"
+    ws_fb.append(HEADERS)
+    _apply_header_color(ws_fb, COLOR_FB)
+    for lead in sorted(fb_leads, key=lambda x: x.get("created_time", "")):
+        ws_fb.append(_lead_to_row(lead))
+
+    # IG sheet
+    ws_ig = wb.create_sheet(title="IG")
+    ws_ig.append(HEADERS)
+    _apply_header_color(ws_ig, COLOR_IG)
+    for lead in sorted(ig_leads, key=lambda x: x.get("created_time", "")):
+        ws_ig.append(_lead_to_row(lead))
+
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -247,6 +298,7 @@ def handle_stats(chat_id: str):
 
 def handle_download(chat_id: str, platform: str = None):
     label = {"FB": "FB", "IG": "IG"}.get(platform, "全部")
+    color = {"FB": COLOR_FB, "IG": COLOR_IG}.get(platform)
     tg_send(chat_id, f"⏳ 準備 {label} 表單資料...")
     leads = fetch_all_leads(platform=platform)
     if not leads:
@@ -254,8 +306,25 @@ def handle_download(chat_id: str, platform: str = None):
         return
     now_str  = datetime.now(TZ_TAIPEI).strftime("%Y%m%d_%H%M")
     filename = f"慢序選物所_{label}表單_{now_str}.xlsx"
-    xlsx     = leads_to_xlsx(leads, f"{label}潛在顧客")
+    xlsx     = leads_to_xlsx(leads, f"{label}潛在顧客", header_color=color)
     tg_send_doc(chat_id, xlsx, filename, f"📥 {label} 潛在顧客（共 {len(leads)} 筆）")
+
+
+def handle_export(chat_id: str):
+    """Export FB + IG as a single dual-sheet XLSX."""
+    tg_send(chat_id, "⏳ 準備全部名單（FB + IG 雙頁）...")
+    all_leads = fetch_all_leads()
+    fb_leads  = [l for l in all_leads if l.get("platform", "").upper() == "FB"]
+    ig_leads  = [l for l in all_leads if l.get("platform", "").upper() == "IG"]
+    if not all_leads:
+        tg_send(chat_id, "⚠️ 目前沒有任何 Lead 資料")
+        return
+    now_str  = datetime.now(TZ_TAIPEI).strftime("%Y%m%d_%H%M")
+    filename = f"慢序選物所_名單_{now_str}.xlsx"
+    xlsx     = leads_to_xlsx_dual(fb_leads, ig_leads)
+    caption  = (f"📥 名單匯出｜FB {len(fb_leads)} 筆（藍）＋IG {len(ig_leads)} 筆（紫）"
+                f"｜共 {len(all_leads)} 筆")
+    tg_send_doc(chat_id, xlsx, filename, caption)
 
 
 def handle_find(chat_id: str, query: str):
@@ -323,10 +392,10 @@ def daily_report():
     tg_send(TG_CHAT_ID, "\n".join(lines))
 
     if leads:
-        xlsx    = leads_to_xlsx(leads, "當日潛在顧客")
+        xlsx    = leads_to_xlsx_dual(fb_leads, ig_leads)
         now_fn  = datetime.now(TZ_TAIPEI).strftime("%Y%m%d")
         tg_send_doc(TG_CHAT_ID, xlsx, f"慢序選物所_{now_fn}日報.xlsx",
-                    caption=f"📎 {now_fn} 日報 XLS")
+                    caption=f"📎 {now_fn} 日報 XLS（FB藍／IG紫）")
 
 
 def _start_scheduler():
@@ -426,12 +495,13 @@ def tg_update():
     args = parts[1:]
 
     dispatch = {
-        "/stats":  lambda: threading.Thread(target=handle_stats,    args=(chat_id,),              daemon=True).start(),
-        "/fb":     lambda: threading.Thread(target=handle_download,  args=(chat_id, "FB"),         daemon=True).start(),
-        "/ig":     lambda: threading.Thread(target=handle_download,  args=(chat_id, "IG"),         daemon=True).start(),
-        "/all":    lambda: threading.Thread(target=handle_download,  args=(chat_id, None),         daemon=True).start(),
-        "/find":   lambda: threading.Thread(target=handle_find,      args=(chat_id, " ".join(args)), daemon=True).start(),
-        "/adrank": lambda: threading.Thread(target=handle_adrank,   args=(chat_id,),              daemon=True).start(),
+        "/stats":   lambda: threading.Thread(target=handle_stats,    args=(chat_id,),               daemon=True).start(),
+        "/fb":      lambda: threading.Thread(target=handle_download,  args=(chat_id, "FB"),          daemon=True).start(),
+        "/ig":      lambda: threading.Thread(target=handle_download,  args=(chat_id, "IG"),          daemon=True).start(),
+        "/all":     lambda: threading.Thread(target=handle_download,  args=(chat_id, None),          daemon=True).start(),
+        "/export":  lambda: threading.Thread(target=handle_export,    args=(chat_id,),               daemon=True).start(),
+        "/find":    lambda: threading.Thread(target=handle_find,      args=(chat_id, " ".join(args)), daemon=True).start(),
+        "/adrank":  lambda: threading.Thread(target=handle_adrank,   args=(chat_id,),               daemon=True).start(),
     }
     if cmd in dispatch:
         dispatch[cmd]()
